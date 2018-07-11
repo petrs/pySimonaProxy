@@ -7,7 +7,8 @@ import socket
 import sys
 import _thread
 import time
- 
+import re
+
 HOST = ''   # Symbolic name meaning all available interfaces
 PORT = 4001 # Arbitrary non-privileged port
 
@@ -18,6 +19,15 @@ CMD_SEPARATOR = ":"
 CMD_LINE_SEPARATOR = "|"
 CMD_RESPONSE_END = "@@"
 CMD_RESPONSE_FAIL = "FAIL"
+
+# Function for pasing input request
+# ><reader name>|><cmd ID>:<"APDU" / "RESET" / "ENUM">:<optional hexa string, e.g. "00A4040304">|
+def parseInputRequest(s):
+    match = re.match(r'>(?P<readerName>.*?)\|>(?P<commandID>.*?):(?P<commandName>.*?):(?P<commandData>.*?)\|', s, re.I)
+    if match:
+        return True,match.group("readerName"),match.group("commandID"),match.group("commandName"),match.group("commandData")
+    else:
+        return False,'', '', '', ''
 
 # Function for handling connections. This will be used to create threads
 def clientthread(connection):
@@ -38,39 +48,12 @@ def clientthread(connection):
 
         print('>> ' + value)
 
-        # Process line by line(separate by CMD_LINE_SEPARATOR)
-        # 1st line == reader name with format: '><reader name>@'
-        if value[0] != '>' :
-            print('> was expected at begin')
+        # parse input
+        valid, readerName, uniqueCmdID, command, commandData = parseInputRequest(value)
 
-        pos = value.find(CMD_LINE_SEPARATOR)
-        if pos != -1:
-            readerName = value[1 : pos - 1]
-            pos += 1
-        else:
-            print("Missing line separator " + CMD_LINE_SEPARATOR)
+        if not valid:
+            print('Invalid input request, skipping')
             continue
-
-        # 2nd line == command with format:
-        # '><cmd ID>:<"APDU" / "RESET" / "ENUM">:<optional hexa string, e.g. "00A4040304">@'
-        if value[pos] != '>':
-            print("'>'was expected at begin")
-
-        pos += 1
-
-        pos2 = value.find(CMD_SEPARATOR, pos)
-        uniqueCmdID = value[pos : pos2]
-        pos = pos2 + 1
-
-        pos2 = value.find(CMD_SEPARATOR, pos)
-        command = value[pos : pos2]
-        pos = pos2 + 1
-
-        pos2 = value.find(CMD_LINE_SEPARATOR, pos)
-        commandData = value[pos : pos2]
-        pos = pos2 + 1
-
-        # The rest of input is ignored
 
         print("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(readerName, uniqueCmdID, command, commandData))
 
@@ -95,7 +78,6 @@ def clientthread(connection):
 
         response = ">{0}{1}{2}{3}\n".format(uniqueCmdID, CMD_SEPARATOR, responseData, CMD_RESPONSE_END)
         print(response)
-
         connection.sendall(response.encode("utf-8"))
 
     # Terminate connection for given client (if outside loop)
@@ -131,3 +113,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
