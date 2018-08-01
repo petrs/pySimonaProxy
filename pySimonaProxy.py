@@ -3,11 +3,16 @@
 # Based on Simple socket server using threads by Silver Moon
 # (https://www.binarytides.com/python-socket-server-code-example/)
 
+import _thread
+import json
+import logging
+import re
+import requests
 import socket
 import sys
-import _thread
 import time
-import re
+
+logging.basicConfig(level=logging.DEBUG)
 
 HOST = ''   # Symbolic name meaning all available interfaces
 PORT = 4001 # Arbitrary non-privileged port
@@ -49,7 +54,6 @@ def parse_input_request(s):
 def clientthread(connection):
     # infinite loop so that function do not terminate and thread do not end.
     while True:
-
         # Receiving from client
         data = connection.recv(4096)
 
@@ -57,21 +61,19 @@ def clientthread(connection):
             time.sleep(0.1) # sleep little before making another receive attempt
             continue
 
-        print(data)
-
         value = data.decode("utf-8")
         value = value.strip()
 
-        print('>> ' + value)
+        logging.debug(">> " + value)
 
         # parse input
         input_req = parse_input_request(value)
 
         if not input_req:
-            print('Invalid input request, skipping')
+            logging.error('Invalid input request, skipping')
             continue
 
-        print("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(input_req.reader_name,
+        logging.info("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(input_req.reader_name,
                                                                                            input_req.command_id,
                                                                                            input_req.command_name,
                                                                                            input_req.command_data))
@@ -80,8 +82,31 @@ def clientthread(connection):
 
         # SEND APDU
         if input_req.command_name.lower() == CMD_APDU.lower():
-            response_data = "102030409000"   # test response, send to SIMONA instead
-            response_created = True
+            #headers = {'X-Auth-Token': 'b'}
+            #urllib.parse.quote_plus('http://127.0.0.1:8081/api/v1/basic?terminal=%2F{0}%401&apdu=00A4000C023F00&reset=1')
+            #url = '.format(input_req.reader_nam)
+            #r = requests.get(url, headers)
+            headers = {'X-Auth-Token': 'b'}
+            #payload = {'apdu': '00A4000C023F00', 'terminal': '/147.251.49.70@1'}
+            payload = {'apdu': '00A4000C023F00', 'terminal': 'Generic EMV Smartcard Reader 0'}
+            try:
+                logging.debug('Going to to send REST request...')
+                r = requests.get('http://127.0.0.1:8081/api/v1/basic', params=payload, headers=headers)
+                # basicj will return json with more info
+                # r = requests.get('http://127.0.0.1:8081/api/v1/basicj', params=payload, headers=headers)
+            except ConnectionError as e:
+                logging.error('Problem with connection' + e)
+                response_data = "102030409000"  # BUGBUG test response instead
+                response_created = True
+            except:
+                logging.error('Problem with connection')
+                response_data = "102030409000"  # BUGBUG test response instead
+                response_created = True
+            else:
+                # process response
+                logging.debug('Response received')
+                response_data = r.iter_lines()  # test response, send to SIMONA instead
+                response_created = True
 
         # RESET
         if input_req.command_name.lower() == CMD_RESET.lower():
@@ -96,7 +121,7 @@ def clientthread(connection):
 
         response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, input_req.command_data,
                                             CMD_RESPONSE_END)
-        print(response)
+        logging.info(response)
         connection.sendall(response.encode("utf-8"))
 
     # Terminate connection for given client (if outside loop)
@@ -105,26 +130,26 @@ def clientthread(connection):
 
 def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    print('Socket created')
+    logging.debug('Socket created')
 
     # Bind socket to local host and port
     try:
         s.bind((HOST, PORT))
     except socket.error as msg:
-        print('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
+        logging.error('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
         sys.exit()
 
-    print('Socket bind complete')
+    logging.debug('Socket bind complete')
 
     # Start listening on socket
     s.listen(10)
-    print('Socket now listening')
+    logging.info('Socket now listening')
 
     # now keep talking with the client
     while 1:
         # wait to accept a connection - blocking call
         conn, addr = s.accept()
-        print('Connected with ' + addr[0] + ':' + str(addr[1]))
+        logging.info('Connected with ' + addr[0] + ':' + str(addr[1]))
 
         # start new thread takes with arguments
         _thread.start_new_thread(clientthread,(conn,))
