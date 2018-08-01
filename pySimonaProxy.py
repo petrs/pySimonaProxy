@@ -6,16 +6,28 @@
 import _thread
 import json
 import logging
+import coloredlogs
 import re
 import requests
 import socket
 import sys
 import time
 
+logger = logging.getLogger(__name__)
+coloredlogs.install(level='DEBUG')
+# coloredlogs.install(level='DEBUG', logger=logger) # to suppress logs from libs
+
 logging.basicConfig(level=logging.DEBUG)
+
+TEST_SIMULATED_CARD = False # if true, simulated response is send back
 
 HOST = ''   # Symbolic name meaning all available interfaces
 PORT = 4001 # Arbitrary non-privileged port
+
+GPPROREST_PROXY = 'http://127.0.0.1:8081/api/v1/basic'  # rest proxy for simona boards, use basicj for more info
+GPPROREST_TEST_WITH_LOCAL_READER = True # if true, name of local reader will be used instead of supplied remote one
+GPPROREST_TEST_LOCAL_READER = 'Generic EMV Smartcard Reader 0'
+headers = {'X-Auth-Token': 'b', 'Connection': 'close'}
 
 CMD_APDU = "APDU"
 CMD_RESET = "RESET"
@@ -44,117 +56,138 @@ class InputRequestData:
 def parse_input_request(s):
     match = re.match(r'>(?P<readerName>.*?)\|>(?P<commandID>.*?):(?P<commandName>.*?):(?P<commandData>.*?)\|', s, re.I)
     if match:
+        command_data = match.group("commandData")
+        command_data = command_data.replace(' ', '')
         return InputRequestData(match.group("readerName"), match.group("commandID"),
-                                match.group("commandName"),match.group("commandData"))
+                                match.group("commandName"), command_data)
     else:
         return None
 
+def make_request(proxy, payload, headers):
+    response_data = None
+    try:
+        logging.debug('Going to to send REST request to GPProREST proxy...')
+        r = requests.get(proxy, params=payload, headers=headers)
+    except ConnectionError as e:
+        logging.error('Problem with connection' + e)
+    except:
+        logging.error('Problem with connection')
+    else:
+        # process response
+        logging.debug('Response received')
+        for line in r.content.decode().splitlines():
+            if line != 'null' and len(line) > 0:
+                response_data = line
+                break
+        r.close()
+
+    return response_data
+
 
 # Function for handling connections. This will be used to create threads
-def clientthread(connection):
-    # infinite loop so that function do not terminate and thread do not end.
-    while True:
-        # Receiving from client
-        data = connection.recv(4096)
+def client_thread(connection, ip, port):
+    try:
+        # infinite loop so that function do not terminate and thread do not end.
+        while True:
+            # Receiving from client
+            data = connection.recv(4096)
 
-        if len(data) == 0:
-            time.sleep(0.1) # sleep little before making another receive attempt
-            continue
+            if len(data) == 0:
+                time.sleep(0.1) # sleep little before making another receive attempt
+                continue
 
-        value = data.decode("utf-8")
-        value = value.strip()
+            value = data.decode("utf-8")
+            value = value.strip()
 
-        logging.debug(">> " + value)
+            logging.debug(">> " + value)
 
-        # parse input
-        input_req = parse_input_request(value)
+            # parse input
+            input_req = parse_input_request(value)
 
-        if not input_req:
-            logging.error('Invalid input request, skipping')
-            continue
+            if not input_req:
+                logging.error('Invalid input request, skipping')
+                continue
 
-        logging.info("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(input_req.reader_name,
-                                                                                           input_req.command_id,
-                                                                                           input_req.command_name,
-                                                                                           input_req.command_data))
-        response_created = False
-        response_data = ""
+            logging.info("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(input_req.reader_name,
+                                                                                               input_req.command_id,
+                                                                                               input_req.command_name,
+                                                                                               input_req.command_data))
+            # for testing with local card, rename Simona readers to local one
+            if GPPROREST_TEST_WITH_LOCAL_READER:
+                if input_req.reader_name.find('Simona') != -1:
+                    logging.debug('Changing remote reader {0} to local reader {1} for testing'.format(input_req.reader_name, GPPROREST_TEST_LOCAL_READER))
+                    input_req.reader_name = GPPROREST_TEST_LOCAL_READER
 
-        # SEND APDU
-        if input_req.command_name.lower() == CMD_APDU.lower():
-            #headers = {'X-Auth-Token': 'b'}
-            #urllib.parse.quote_plus('http://127.0.0.1:8081/api/v1/basic?terminal=%2F{0}%401&apdu=00A4000C023F00&reset=1')
-            #url = '.format(input_req.reader_nam)
-            #r = requests.get(url, headers)
-            headers = {'X-Auth-Token': 'b'}
-            #payload = {'apdu': '00A4000C023F00', 'terminal': '/147.251.49.70@1'}
-            payload = {'apdu': '00A4000C023F00', 'terminal': 'Generic EMV Smartcard Reader 0'}
-            try:
-                logging.debug('Going to to send REST request...')
-                r = requests.get('http://127.0.0.1:8081/api/v1/basic', params=payload, headers=headers)
-                # basicj will return json with more info
-                # r = requests.get('http://127.0.0.1:8081/api/v1/basicj', params=payload, headers=headers)
-            except ConnectionError as e:
-                logging.error('Problem with connection' + e)
-                response_data = "102030409000"  # BUGBUG test response instead
-                response_created = True
-            except:
-                logging.error('Problem with connection')
-                response_data = "102030409000"  # BUGBUG test response instead
-                response_created = True
-            else:
-                # process response
-                logging.debug('Response received')
-                response_data = r.iter_lines()  # test response, send to SIMONA instead
-                response_created = True
+            response_created = False
+            response_data = None
 
-        # RESET
-        if input_req.command_name.lower() == CMD_RESET.lower():
-            # test response, send to SIMONA instead
-            response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
-            response_created = True
+            # SEND APDU
+            if input_req.command_name.lower() == CMD_APDU.lower():
+                if TEST_SIMULATED_CARD:
+                    response_data = "102030409000"
+                else:
+                    payload = {'apdu': input_req.command_data, 'terminal': input_req.reader_name}
+                    response_data = make_request(GPPROREST_PROXY, payload, headers)
 
-        # No valid command found
-        if not response_created:
-            response_data = CMD_RESPONSE_FAIL
-            response_created = True
+            # RESET
+            if input_req.command_name.lower() == CMD_RESET.lower():
+                if TEST_SIMULATED_CARD:
+                    # test response, send to SIMONA instead
+                    response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
+                else:
+                    payload = {'reset': '1', 'terminal': input_req.reader_name}
+                    response_data = make_request(GPPROREST_PROXY, payload, headers)
 
-        response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, input_req.command_data,
-                                            CMD_RESPONSE_END)
-        logging.info(response)
-        connection.sendall(response.encode("utf-8"))
+
+            # No valid command found
+            if not response_data:
+                response_data = CMD_RESPONSE_FAIL
+
+            response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, response_data,
+                                                CMD_RESPONSE_END)
+            logging.info(response)
+            connection.sendall(response.encode("utf-8"))
+    except:
+        logging.info('Exception in serving response, ending thread')
+        logging.info('\n')
 
     # Terminate connection for given client (if outside loop)
     connection.close()
+    return
 
 
 def main():
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    logging.debug('Socket created')
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as soc:
+        # this is for easy starting/killing the app
+        soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        logging.debug('Socket created')
 
-    # Bind socket to local host and port
-    try:
-        s.bind((HOST, PORT))
-    except socket.error as msg:
-        logging.error('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
-        sys.exit()
+        # Bind socket to local host and port
+        try:
+            soc.bind((HOST, PORT))
+            logging.debug('Socket bind complete')
+        except socket.error as msg:
+            logging.error('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
+            sys.exit()
 
-    logging.debug('Socket bind complete')
 
-    # Start listening on socket
-    s.listen(10)
-    logging.info('Socket now listening')
+        # Start listening on socket
+        soc.listen(10)
+        logging.info('Socket now listening')
 
-    # now keep talking with the client
-    while 1:
-        # wait to accept a connection - blocking call
-        conn, addr = s.accept()
-        logging.info('Connected with ' + addr[0] + ':' + str(addr[1]))
+        from threading import Thread
 
-        # start new thread takes with arguments
-        _thread.start_new_thread(clientthread,(conn,))
+        # now keep talking with the client
+        while True:
+            # wait to accept a connection - blocking call
+            conn, addr = soc.accept()
+            ip, port = str(addr[0]), str(addr[1])
+            logging.info('Connected with ' + ip + ':' + port)
 
-    s.close()
+            # start new thread takes with arguments
+            Thread(target=client_thread, args=(conn, ip, port)).start()
+
+        soc.close()
 
 if __name__ == "__main__":
     main()
