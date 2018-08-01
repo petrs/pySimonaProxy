@@ -20,14 +20,30 @@ CMD_LINE_SEPARATOR = "|"
 CMD_RESPONSE_END = "@@"
 CMD_RESPONSE_FAIL = "FAIL"
 
+
+class InputRequestData:
+    reader_name = ""
+    command_id = ""
+    command_name = ""
+    command_data = ""
+
+    def __init__(self, reader_name, command_id, command_name, command_data):
+        self.reader_name = reader_name
+        self.command_id = command_id
+        self.command_name = command_name
+        self.command_data = command_data
+
+
 # Function for pasing input request
 # ><reader name>|><cmd ID>:<"APDU" / "RESET" / "ENUM">:<optional hexa string, e.g. "00A4040304">|
-def parseInputRequest(s):
+def parse_input_request(s):
     match = re.match(r'>(?P<readerName>.*?)\|>(?P<commandID>.*?):(?P<commandName>.*?):(?P<commandData>.*?)\|', s, re.I)
     if match:
-        return True,match.group("readerName"),match.group("commandID"),match.group("commandName"),match.group("commandData")
+        return InputRequestData(match.group("readerName"), match.group("commandID"),
+                                match.group("commandName"),match.group("commandData"))
     else:
-        return False,'', '', '', ''
+        return None
+
 
 # Function for handling connections. This will be used to create threads
 def clientthread(connection):
@@ -49,39 +65,43 @@ def clientthread(connection):
         print('>> ' + value)
 
         # parse input
-        valid, readerName, uniqueCmdID, command, commandData = parseInputRequest(value)
+        input_req = parse_input_request(value)
 
-        if not valid:
+        if not input_req:
             print('Invalid input request, skipping')
             continue
 
-        print("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(readerName, uniqueCmdID, command, commandData))
-
-        bReponseCreated = False
-        responseData = ""
+        print("Reader: '{0}', CommandID: '{1}', Command: '{2}', CommandData: '{3}'".format(input_req.reader_name,
+                                                                                           input_req.command_id,
+                                                                                           input_req.command_name,
+                                                                                           input_req.command_data))
+        response_created = False
+        response_data = ""
 
         # SEND APDU
-        if command.lower() == CMD_APDU.lower():
-            responseData = "102030409000"   # test response, send to SIMONA instead
-            bReponseCreated = True
+        if input_req.command_name.lower() == CMD_APDU.lower():
+            response_data = "102030409000"   # test response, send to SIMONA instead
+            response_created = True
 
         # RESET
-        if command.lower() == CMD_RESET.lower():
+        if input_req.command_name.lower() == CMD_RESET.lower():
             # test response, send to SIMONA instead
-            responseData = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
-            bReponseCreated = True
+            response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
+            response_created = True
 
         # No valid command found
-        if not bReponseCreated:
-            responseData = CMD_RESPONSE_FAIL
-            bReponseCreated = True
+        if not response_created:
+            response_data = CMD_RESPONSE_FAIL
+            response_created = True
 
-        response = ">{0}{1}{2}{3}\n".format(uniqueCmdID, CMD_SEPARATOR, responseData, CMD_RESPONSE_END)
+        response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, input_req.command_data,
+                                            CMD_RESPONSE_END)
         print(response)
         connection.sendall(response.encode("utf-8"))
 
     # Terminate connection for given client (if outside loop)
     connection.close()
+
 
 def main():
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
