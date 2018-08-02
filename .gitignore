@@ -1,6 +1,7 @@
 # rest proxy binaries and configs
 gppro-rest-0.1.0.jar
 global.json
+global_buildinreader.json
 onetimekeystore.jks
 simonasmartcardio.jar
 config/
