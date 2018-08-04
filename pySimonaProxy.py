@@ -29,10 +29,10 @@ CMD_RESPONSE_FAIL = "FAIL"
 
 
 class ProxyConfig:
-    test_simulated_card = False # if true, simulated response is send back
+    test_simulated_card = False # if true, completely simulated response is send back
 
-    socket_host = ''   # Symbolic name meaning all available interfaces
-    socket_port = 4001 # Arbitrary non-privileged port
+    socket_host = ''    # Symbolic name meaning all available interfaces
+    socket_port = 4001  # Arbitrary non-privileged port
 
     gpprorest_proxy = 'http://127.0.0.1:8081/api/v1/basic'  # rest proxy for simona boards, use basicj for more info
     gpprorest_http_headers = {'X-Auth-Token': 'b'}
@@ -40,7 +40,6 @@ class ProxyConfig:
     gpprorest_test_with_local_reader = True # if true, name of local reader will be used instead of supplied remote one
     # gpprorest_test_local_reader = 'Generic EMV Smartcard Reader 0'
     gpprorest_test_local_reader = 'OMNIKEY CardMan 6121 0'
-
 
 
 class InputRequestData:
@@ -172,7 +171,7 @@ class SimonaSocketProxy:
             # Bind socket to local host and port
             try:
                 soc.bind((proxy_cfg.socket_host, proxy_cfg.socket_port))
-                logging.debug('Socket bind complete')
+                logging.debug('Socket bind complete. host:{0}, port:{1}'.format(proxy_cfg.socket_host, proxy_cfg.socket_port))
             except socket.error as msg:
                 logging.error('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
                 sys.exit()

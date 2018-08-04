@@ -1,3 +1,6 @@
+# run scripts with custom params
+run_proxy.py
+
 # rest proxy binaries and configs
 gppro-rest-0.1.0.jar
 global.json
