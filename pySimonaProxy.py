@@ -1,9 +1,14 @@
 #!/usr/bin/python3
 
+# File name: pySimonaProxy.py
+# Author: Petr Svenda, Dan Cvrcek
+# Date created: 7/11/2018
+# Python Version: 3.x
+# MIT license
+#
 # Based on Simple socket server using threads by Silver Moon
 # (https://www.binarytides.com/python-socket-server-code-example/)
 
-import _thread
 import json
 import logging
 import coloredlogs
@@ -12,6 +17,7 @@ import requests
 import socket
 import sys
 import time
+import threading
 
 logger = logging.getLogger(__name__)
 coloredlogs.install(level='DEBUG')
@@ -55,11 +61,97 @@ class InputRequestData:
         self.command_data = command_data
 
 
+class ClientThread(threading.Thread):
+    """
+    Function for handling connections. This will be used to create threads
+    """
+
+    def __init__(self, connection, ip, port, proxy_cfg):
+        threading.Thread.__init__(self)
+        self.connection = connection
+        self.ip = ip
+        self.port = port
+        self.proxy_cfg = proxy_cfg
+
+    def run(self):
+        try:
+            # infinite loop so that function do not terminate and thread do not end.
+            while True:
+                # first we read all the commands
+                data = self.connection.recv(4096)
+                if len(data) == 0:  # connection was closed
+                    break
+
+                reader, commands = SimonaSocketProxy.parse_input_request(data)
+
+                if len(commands) == 0:
+                    logging.error("No commands to process")
+                    time.sleep(0.1)  # sleep little before making another receive attempt
+                    continue
+
+                for command in commands:
+                    if len(command) == 2:
+                        input_req = InputRequestData(reader, command['id'], command['name'], "")
+                    else:
+                        input_req = InputRequestData(reader, command['id'], command['name'], command['bytes'])
+
+                    logging.info("Reader:'{0}',CommandID:'{1}',Command:'{2}',Data:'{3}'".format(input_req.reader_name,
+                                                                                                input_req.command_id,
+                                                                                                input_req.command_name,
+                                                                                                input_req.command_data))
+                    # for testing with local card, rename Simona readers to local one
+                    if self.proxy_cfg.gpprorest_test_with_local_reader:
+                        if input_req.reader_name.find('Simona') != -1:
+                            logging.debug('Changing remote reader {0} to local reader {1} for testing'
+                                          .format(input_req.reader_name, self.proxy_cfg.gpprorest_test_local_reader))
+                            input_req.reader_name = self.proxy_cfg.gpprorest_test_local_reader
+
+                    response_data = None
+
+                    # SEND APDU
+                    if input_req.command_name.lower() == CMD_APDU.lower():
+                        if self.proxy_cfg.test_simulated_card:
+                            # test response
+                            response_data = "102030409000"
+                        else:
+                            payload = {'apdu': input_req.command_data, 'terminal': input_req.reader_name}
+                            response_data = SimonaSocketProxy.make_request(
+                                self.proxy_cfg.gpprorest_proxy, payload,
+                                self.proxy_cfg.gpprorest_http_headers)
+
+                    # RESET
+                    if input_req.command_name.lower() == CMD_RESET.lower():
+                        if self.proxy_cfg.test_simulated_card:
+                            # test response
+                            response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
+                        else:
+                            payload = {'reset': '1', 'terminal': input_req.reader_name, 'close': '1'}
+                            response_data = SimonaSocketProxy.make_request(
+                                self.proxy_cfg.gpprorest_proxy, payload,
+                                self.proxy_cfg.gpprorest_http_headers)
+
+                    # No valid command found
+                    if not response_data:
+                        response_data = CMD_RESPONSE_FAIL
+
+                    response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, response_data,
+                                                        CMD_RESPONSE_END)
+                    logging.info(response)
+                self.connection.sendall(response.encode("utf-8"))
+        except Exception as ex:
+            logging.info('Exception in serving response, ending thread %s' % ex)
+            logging.info('\n')
+
+        # Terminate connection for given client (if outside loop)
+        self.connection.close()
+        return
+
+
 class SimonaSocketProxy:
-    # Function for pasing input request
+    # Function for parsing input request
     # ><reader name>|><cmd ID>:<"APDU" / "RESET" / "ENUM">:<optional hexa string, e.g. "00A4040304">|
     @staticmethod
-    def parse_input_request(s):
+    def parse_input_request_regex(s):
         match = re.match(r'>(?P<readerName>.*?)\|>(?P<commandID>.*?):(?P<commandName>.*?):(?P<commandData>.*?)\|', s, re.I)
         if match:
             command_data = match.group("commandData")
@@ -68,6 +160,47 @@ class SimonaSocketProxy:
                                     match.group("commandName"), command_data)
         else:
             return None
+
+    # Function for parsing input request - assumes every line starting with > to be on separate line
+    @staticmethod
+    def parse_input_request(data):
+        # Receiving from client
+        reader = None
+        commands = []
+
+        buffer_list = []
+        try:
+            buffer_list.append(data.decode('utf-8'))
+        except TypeError:
+            logging.error("Received data can't be converted to text")
+            pass
+        data = ''.join(buffer_list)
+
+        lines = data.splitlines()
+        for line in lines:
+            if line[0] == '#':
+                # this may be in internal info
+                pass
+            elif line[0] != '>':
+                # we will ignore this line
+                continue
+            line = line[1:].strip()  # ignore the '>' and strip whitespaces
+            if line.rfind('|') < 0:
+                logging.error("Possibly missing | at the end of the line %s " % line)
+            if not reader:
+                reader = line[:line.rfind("|")]  # if '|' is not in string, it will take the whole line
+            else:
+                cmd_parts = line[:line.rfind("|")].split(':')
+                if len(cmd_parts) < 2 or len(cmd_parts) > 3:
+                    logging.error('Invalid line %s - ignoring it' % line)
+                    continue
+
+                item = {'id': cmd_parts[0], 'name': cmd_parts[1]}
+                if len(cmd_parts) == 3:
+                    item['bytes'] = cmd_parts[2].replace(' ', '')
+                commands.append(item)
+
+        return reader, commands
 
     @staticmethod
     def make_request(proxy, payload, headers):
@@ -90,88 +223,16 @@ class SimonaSocketProxy:
 
         return response_data
 
-    # Function for handling connections. This will be used to create threads
-    @staticmethod
-    def client_thread(connection, ip, port, proxy_cfg):
-        try:
-            # infinite loop so that function do not terminate and thread do not end.
-            while True:
-                # Receiving from client
-                data = connection.recv(4096)
-
-                if len(data) == 0:
-                    time.sleep(0.1) # sleep little before making another receive attempt
-                    continue
-
-                value = data.decode("utf-8")
-                value = value.strip()
-
-                logging.debug(">> " + value)
-
-                # parse input
-                input_req = SimonaSocketProxy.parse_input_request(value)
-
-                if not input_req:
-                    logging.error('Invalid input request, skipping')
-                    continue
-
-                logging.info("Reader:'{0}',CommandID:'{1}',Command:'{2}',Data:'{3}'".format(input_req.reader_name,
-                                                                                            input_req.command_id,
-                                                                                            input_req.command_name,
-                                                                                            input_req.command_data))
-                # for testing with local card, rename Simona readers to local one
-                if proxy_cfg.gpprorest_test_with_local_reader:
-                    if input_req.reader_name.find('Simona') != -1:
-                        logging.debug('Changing remote reader {0} to local reader {1} for testing'
-                                      .format(input_req.reader_name, proxy_cfg.gpprorest_test_local_reader))
-                        input_req.reader_name = proxy_cfg.gpprorest_test_local_reader
-
-                response_data = None
-
-                # SEND APDU
-                if input_req.command_name.lower() == CMD_APDU.lower():
-                    if proxy_cfg.test_simulated_card:
-                        response_data = "102030409000"
-                    else:
-                        payload = {'apdu': input_req.command_data, 'terminal': input_req.reader_name}
-                        response_data = SimonaSocketProxy.make_request(proxy_cfg.gpprorest_proxy, payload, proxy_cfg.gpprorest_http_headers)
-
-                # RESET
-                if input_req.command_name.lower() == CMD_RESET.lower():
-                    if proxy_cfg.test_simulated_card:
-                        # test response, send to SIMONA instead
-                        response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
-                    else:
-                        payload = {'reset': '1', 'terminal': input_req.reader_name, 'close': '1'}
-                        response_data = SimonaSocketProxy.make_request(proxy_cfg.gpprorest_proxy, payload, proxy_cfg.gpprorest_http_headers)
-
-                # No valid command found
-                if not response_data:
-                    response_data = CMD_RESPONSE_FAIL
-
-                response = ">{0}{1}{2}{3}\n".format(input_req.command_id, CMD_SEPARATOR, response_data,
-                                                    CMD_RESPONSE_END)
-                logging.info(response)
-                connection.sendall(response.encode("utf-8"))
-        except:
-            logging.info('Exception in serving response, ending thread')
-            logging.info('\n')
-
-        # Terminate connection for given client (if outside loop)
-        connection.close()
-        return
-
     @staticmethod
     def start_server(proxy_cfg):
+
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as soc:
-            # this is for easy starting/killing the app
-            soc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             logging.debug('Socket created')
 
-            # Bind socket to local host and port
             try:
                 soc.bind((proxy_cfg.socket_host, proxy_cfg.socket_port))
-                logging.debug('Socket bind complete. host:{0}, port:{1}'.format(proxy_cfg.socket_host, proxy_cfg.socket_port))
+                logging.debug(
+                    'Socket bind complete. host:{0}, port:{1}'.format(proxy_cfg.socket_host, proxy_cfg.socket_port))
             except socket.error as msg:
                 logging.error('Bind failed. Error Code : ' + str(msg[0]) + ' Message ' + msg[1])
                 sys.exit()
@@ -179,8 +240,6 @@ class SimonaSocketProxy:
             # Start listening on socket
             soc.listen(10)
             logging.info('Socket now listening')
-
-            from threading import Thread
 
             # now keep talking with the client
             while True:
@@ -190,7 +249,10 @@ class SimonaSocketProxy:
                 logging.info('Connected with ' + ip + ':' + port)
 
                 # start new thread takes with arguments
-                Thread(target=SimonaSocketProxy.client_thread, args=(conn, ip, port, proxy_cfg)).start()
+                new_client = ClientThread(conn, ip, port, proxy_cfg)
+
+                new_client.start()
+                new_client.join()
 
             soc.close()
 
@@ -198,6 +260,7 @@ class SimonaSocketProxy:
 def main():
     proxy_cfg = ProxyConfig()   # use default config
     SimonaSocketProxy.start_server(proxy_cfg)
+
 
 if __name__ == "__main__":
     main()
