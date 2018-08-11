@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.DEBUG)
 CMD_APDU = "APDU"
 CMD_RESET = "RESET"
 CMD_ENUM = "ENUM"
+CMD_PERSONALIZE = "PERSONALIZE"
 CMD_SEPARATOR = ":"
 CMD_LINE_SEPARATOR = "|"
 CMD_RESPONSE_END = "@@"
@@ -75,6 +76,8 @@ class ClientThread(threading.Thread):
 
     def run(self):
         try:
+            gpprorest_rewrite_reader = self.proxy_cfg.gpprorest_test_local_reader
+
             # infinite loop so that function do not terminate and thread do not end.
             while True:
                 # first we read all the commands
@@ -99,14 +102,20 @@ class ClientThread(threading.Thread):
                                                                                                 input_req.command_id,
                                                                                                 input_req.command_name,
                                                                                                 input_req.command_data))
-                    # for testing with local card, rename Simona readers to local one
-                    if self.proxy_cfg.gpprorest_test_with_local_reader:
-                        if input_req.reader_name.find('Simona') != -1:
-                            logging.debug('Changing remote reader {0} to local reader {1} for testing'
-                                          .format(input_req.reader_name, self.proxy_cfg.gpprorest_test_local_reader))
-                            input_req.reader_name = self.proxy_cfg.gpprorest_test_local_reader
 
                     response_data = None
+
+                    # INITIALIZE AND PERSONALIZE CONNECTION
+                    if input_req.command_name.lower() == CMD_PERSONALIZE.lower():
+                        gpprorest_rewrite_reader = input_req.command_data
+                        response_data = "OK"
+
+                    # for testing with local card, rename Simona readers to local one
+                    if self.proxy_cfg.gpprorest_test_with_local_reader:
+                        # if input_req.reader_name.find('Simona') != -1:
+                        logging.debug("Changing remote reader '{0}' to local reader '{1}' for testing"
+                                      .format(input_req.reader_name, gpprorest_rewrite_reader))
+                        input_req.reader_name = gpprorest_rewrite_reader
 
                     # SEND APDU
                     if input_req.command_name.lower() == CMD_APDU.lower():
@@ -125,7 +134,7 @@ class ClientThread(threading.Thread):
                             # test response
                             response_data = "621A82013883023F008404524F4F5485030079AD8A0105A1038B01019000"
                         else:
-                            payload = {'reset': '1', 'terminal': input_req.reader_name, 'close': '1'}
+                            payload = {'reset': '0', 'terminal': input_req.reader_name, 'close': '0'}
                             response_data = SimonaSocketProxy.make_request(
                                 self.proxy_cfg.gpprorest_proxy, payload,
                                 self.proxy_cfg.gpprorest_http_headers)
@@ -197,7 +206,10 @@ class SimonaSocketProxy:
 
                 item = {'id': cmd_parts[0], 'name': cmd_parts[1]}
                 if len(cmd_parts) == 3:
-                    item['bytes'] = cmd_parts[2].replace(' ', '')
+                    if cmd_parts[1] == "APDU":
+                        item['bytes'] = cmd_parts[2].replace(' ', '') # remove spaces in apdu command data
+                    else:
+                        item['bytes'] = cmd_parts[2] # just copy data
                 commands.append(item)
 
         return reader, commands
